@@ -122,7 +122,7 @@ class DynamicZScoreStrategy:
         z_score = self.data.iloc[-1]['z_score']
         threshold = self.data.iloc[-1]['sell_threshold']
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
-        print(f"--> [{now}] {self.symbol}-{self.name}    \t Price: {price}\t ZScore: {z_score}\t Thres:±{threshold}")
+        print(f"--> [{now}] {self.symbol}-{self.name}    \t Price: {price}\t ZScore: {z_score}\t Thres: ±{threshold}")
         # 打印信号检测信息（仅检测最后一行）
         last_signal = self.data.iloc[-1]['positions']
 
@@ -419,4 +419,4 @@ if __name__ == "__main__":
             next_time = now.replace(minute=next_minute, second=0, microsecond=0)
         sleep_seconds = (next_time - now).total_seconds()
         if sleep_seconds > 0:
-            time.sleep(sleep_seconds)
+            time.sleep(sleep_seconds + 5)
