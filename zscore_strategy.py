@@ -4,6 +4,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 import time
+from trading_signal_alert import TradingSignalAlert
 
 class DynamicZScoreStrategy:
     def __init__(self, symbol="510500", window=240, base_multiplier=1.5, vol_window=60, 
@@ -28,6 +29,8 @@ class DynamicZScoreStrategy:
         self.data = None
         self.positions = []
         self.initial_capital=initial_capital
+
+        self.alert = TradingSignalAlert()
         
     def fetch_data(self, start_date, end_date):
         """
@@ -113,7 +116,7 @@ class DynamicZScoreStrategy:
         self.data['positions'] = self.data['signal'].diff()
         self.data.loc[self.data['signal'] == 0, 'positions'] = 0
 
-    def sequence_print(self):
+    def observe(self):
         price = self.data.iloc[-1]['收盘']
         z_score = self.data.iloc[-1]['z_score']
         threshold = self.data.iloc[-1]['buy_threshold']
@@ -125,6 +128,7 @@ class DynamicZScoreStrategy:
             buy_warn = "买入！"
             sell_warn = "卖出"
             print(f"!!!!!!!!!!! {self.symbol} 检测到交易信号: {buy_warn if last_signal == 1 else sell_warn} !!!!!!!")
+            self.alert.send_alert('buy' if last_signal == 1 else 'sell', f"{self.symbol} 触发[{buy_warn if last_signal == 1 else sell_warn}]信号")
         
     def backtest(self):
         """回测策略"""
@@ -368,7 +372,9 @@ if __name__ == "__main__":
                 strategy.generate_signals()
                 # 打印输出
                 strategy.sequence_print()
+        elif now > afternoon_end:
+            print('--- 今日已结束 ---')
+            break
         else:
             print('--- 不在开盘时间内 ---')
-            break
         time.sleep(60*5)

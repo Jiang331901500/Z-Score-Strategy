@@ -1,0 +1,4 @@
+*.wav
+*.log
+.env
+__pycache__
