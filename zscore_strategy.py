@@ -7,7 +7,7 @@ import time
 from trading_signal_alert import TradingSignalAlert
 
 class DynamicZScoreStrategy:
-    def __init__(self, symbol="510500", window=240, base_multiplier=1.5, vol_window=60, 
+    def __init__(self, symbol="510500", name="中证500ETF", window=240, base_multiplier=1.5, vol_window=60, 
                  min_multiplier=1, max_multiplier=3.0, initial_capital=100000.0):
         """
         初始化动态Z-Score交易策略
@@ -21,6 +21,7 @@ class DynamicZScoreStrategy:
             max_multiplier (float): 最大阈值倍数
         """
         self.symbol = symbol
+        self.name = name
         self.window = window
         self.base_multiplier = base_multiplier
         self.vol_window = vol_window
@@ -119,16 +120,36 @@ class DynamicZScoreStrategy:
     def observe(self):
         price = self.data.iloc[-1]['收盘']
         z_score = self.data.iloc[-1]['z_score']
-        threshold = self.data.iloc[-1]['buy_threshold']
+        threshold = self.data.iloc[-1]['sell_threshold']
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
-        print(f"--> [{now}] {self.symbol} Price: {price}\t ZScore: {z_score}\t Thres:±{threshold}")
+        print(f"--> [{now}] {self.symbol}-{self.name}    \t Price: {price}\t ZScore: {z_score}\t Thres:±{threshold}")
         # 打印信号检测信息（仅检测最后一行）
         last_signal = self.data.iloc[-1]['positions']
+
+        # 如果之前触发过卖出，则不再连续触发卖出；如果之前触发过买入，则30分钟内不再触发买入
+        if not hasattr(self, '_last_buy_time'):
+            self._last_buy_time = None
+        if not hasattr(self, '_last_sell_time'):
+            self._last_sell_time = None
+        if last_signal == 1:
+            # 触发买入时，重置卖出时间
+            self._last_sell_time = None
+            # 买入信号，30分钟内不再重复触发买入
+            now_time = datetime.now()
+            if self._last_buy_time is not None and (now_time - self._last_buy_time).total_seconds() < 1800:
+                return
+            self._last_buy_time = now_time
+        elif last_signal == -1:
+            # 卖出信号，不连续重复触发卖出
+            if self._last_sell_time is not None:
+                return
+            self._last_sell_time = datetime.now()
+
         if last_signal != 0:
             buy_warn = "买入！"
             sell_warn = "卖出"
-            print(f"!!!!!!!!!!! {self.symbol} 检测到交易信号: {buy_warn if last_signal == 1 else sell_warn} !!!!!!!")
-            self.alert.send_alert('buy' if last_signal == 1 else 'sell', f"{self.symbol} 触发[{buy_warn if last_signal == 1 else sell_warn}]信号")
+            print(f"!!!!!!!!!!! {self.symbol}-{self.name} 检测到交易信号: {buy_warn if last_signal == 1 else sell_warn} !!!!!!!")
+            self.alert.send_alert('buy' if last_signal == 1 else 'sell', f"{self.symbol}-{self.name} 触发[{buy_warn if last_signal == 1 else sell_warn}]信号")
         
     def backtest(self):
         """回测策略"""
@@ -338,19 +359,29 @@ class DynamicZScoreStrategy:
         plt.show()
 
 if __name__ == "__main__":
-    etf_list = ['510500', '510300', '510050', '159915', '588190', '588000', '512480', '159819', '512800']
+    etf_dict = {
+        '510500': '中证500ETF', 
+        '510300': '沪深300ETF', 
+        '510050': '上证50ETF', 
+        '159915': '创业板ETF', 
+        '588190': '科创100ETF', 
+        '588000': '科创50ETF',
+        '512480': '半导体ETF', 
+        '159819': '人工智能ETF', 
+        '512800': '银行ETF'
+    }
 
     # 创建策略实例
     strategy_dict = {}
-    for etf in etf_list:
-        strategy_dict[etf] = DynamicZScoreStrategy(symbol=etf)
+    for etf, name in etf_dict.items():
+        strategy_dict[etf] = DynamicZScoreStrategy(symbol=etf, name=name)
 
     while True:
         now = datetime.now()
-        morning_start = datetime(year=now.year, month=now.month, day=now.day, hour=9, minute=35, second=0)
-        morning_end = datetime(year=now.year, month=now.month, day=now.day, hour=11, minute=30, second=0)
-        afternoon_start = datetime(year=now.year, month=now.month, day=now.day, hour=13, minute=5, second=0)
-        afternoon_end = datetime(year=now.year, month=now.month, day=now.day, hour=15, minute=0, second=0)
+        morning_start = datetime(year=now.year, month=now.month, day=now.day, hour=9, minute=35, second=0, microsecond=0)
+        morning_end = datetime(year=now.year, month=now.month, day=now.day, hour=11, minute=30, second=0, microsecond=0)
+        afternoon_start = datetime(year=now.year, month=now.month, day=now.day, hour=13, minute=5, second=0, microsecond=0)
+        afternoon_end = datetime(year=now.year, month=now.month, day=now.day, hour=15, minute=0, second=0, microsecond=0)
 
         if (now >= morning_start and now <= morning_end) or (now >= afternoon_start and now <= afternoon_end):
             end_date = now.strftime("%Y-%m-%d 15:05:00")
@@ -360,7 +391,7 @@ if __name__ == "__main__":
                 try:
                     strategy.fetch_data(start_date, end_date)
                 except Exception:
-                    time.sleep(1)
+                    time.sleep(5)
                     strategy.fetch_data(start_date, end_date)
 
             for strategy in strategy_dict.values():
@@ -371,10 +402,21 @@ if __name__ == "__main__":
                 # 生成交易信号
                 strategy.generate_signals()
                 # 打印输出
-                strategy.sequence_print()
+                strategy.observe()
         elif now > afternoon_end:
             print('--- 今日已结束 ---')
             break
         else:
-            print('--- 不在开盘时间内 ---')
-        time.sleep(60*5)
+            # 等待开盘
+            time.sleep(5)
+        
+        # 等待到下一个5分钟整点
+        now = datetime.now()
+        next_minute = (now.minute // 5 + 1) * 5
+        if next_minute >= 60:
+            next_time = now.replace(hour=now.hour + 1, minute=0, second=0, microsecond=0)
+        else:
+            next_time = now.replace(minute=next_minute, second=0, microsecond=0)
+        sleep_seconds = (next_time - now).total_seconds()
+        if sleep_seconds > 0:
+            time.sleep(sleep_seconds)
