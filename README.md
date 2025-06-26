@@ -1,4 +1,4 @@
-# config
+# Config
 create a `.env` file to configure smtp and email address if you need email alert.
 # Run
 ```
