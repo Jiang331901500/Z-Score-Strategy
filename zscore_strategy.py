@@ -408,7 +408,7 @@ if __name__ == "__main__":
             break
         else:
             # 等待开盘
-            time.sleep(5)
+            print('--- 等待开盘 ---')
         
         # 等待到下一个5分钟整点
         now = datetime.now()
