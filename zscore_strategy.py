@@ -58,7 +58,7 @@ class DynamicZScoreStrategy:
     def calculate_zscore(self):
         """计算Z-Score指标"""
         if self.data is None:
-            raise ValueError("请先获取数据")
+            return
             
         # 计算滚动均值和标准差
         self.data['rolling_mean'] = self.data['收盘'].rolling(window=self.window).mean()
@@ -72,8 +72,8 @@ class DynamicZScoreStrategy:
         
     def calculate_dynamic_thresholds(self):
         """计算动态阈值"""
-        if 'z_score' not in self.data.columns:
-            raise ValueError("请先计算Z-Score")
+        if self.data is None or 'z_score' not in self.data.columns:
+            return
             
         # 计算历史Z-Score的标准差作为波动率指标
         self.data['z_volatility'] = self.data['z_score'].rolling(window=self.vol_window).std()
@@ -102,8 +102,8 @@ class DynamicZScoreStrategy:
         
     def generate_signals(self):
         """生成交易信号"""
-        if 'z_score' not in self.data.columns or 'buy_threshold' not in self.data.columns:
-            raise ValueError("请先计算Z-Score和动态阈值")
+        if self.data is None or 'z_score' not in self.data.columns or 'buy_threshold' not in self.data.columns:
+            return
             
         self.data['signal'] = 0  # 0表示无信号，1表示买入，-1表示卖出
         
@@ -118,6 +118,8 @@ class DynamicZScoreStrategy:
         self.data.loc[self.data['signal'] == 0, 'positions'] = 0
 
     def observe(self):
+        if self.data is None or 'z_score' not in self.data.columns or 'buy_threshold' not in self.data.columns:
+            return
         price = self.data.iloc[-1]['收盘']
         z_score = self.data.iloc[-1]['z_score']
         threshold = self.data.iloc[-1]['sell_threshold']
@@ -153,7 +155,7 @@ class DynamicZScoreStrategy:
         
     def backtest(self):
         """回测策略"""
-        if 'positions' not in self.data.columns:
+        if self.data is None or 'positions' not in self.data.columns:
             raise ValueError("请先生成交易信号")
             
         # 初始化回测变量
@@ -360,7 +362,8 @@ class DynamicZScoreStrategy:
 
 if __name__ == "__main__":
     etf_dict = {
-        '510500': '中证500ETF', 
+        '510500': '中证500ETF',
+        '512100': '中证1000ETF',
         '510300': '沪深300ETF', 
         '510050': '上证50ETF', 
         '159915': '创业板ETF', 
@@ -391,8 +394,13 @@ if __name__ == "__main__":
                 try:
                     strategy.fetch_data(start_date, end_date)
                 except Exception:
-                    time.sleep(5)
-                    strategy.fetch_data(start_date, end_date)
+                    # 重试
+                    time.sleep(10)
+                    try:
+                        strategy.fetch_data(start_date, end_date)
+                    except Exception:
+                        strategy.data = None
+                        print(f"请求{strategy.symbol}失败...")
 
             for strategy in strategy_dict.values():
                 # 计算Z-Score
@@ -401,7 +409,7 @@ if __name__ == "__main__":
                 strategy.calculate_dynamic_thresholds()
                 # 生成交易信号
                 strategy.generate_signals()
-                # 打印输出
+                # 打印输出以及发送提示
                 strategy.observe()
         elif now > afternoon_end:
             print('--- 今日已结束 ---')
@@ -419,4 +427,4 @@ if __name__ == "__main__":
             next_time = now.replace(minute=next_minute, second=0, microsecond=0)
         sleep_seconds = (next_time - now).total_seconds()
         if sleep_seconds > 0:
-            time.sleep(sleep_seconds + 5)
+            time.sleep(sleep_seconds + 30)
