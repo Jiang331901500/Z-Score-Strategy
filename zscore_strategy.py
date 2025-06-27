@@ -2,6 +2,8 @@ import akshare as ak
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import tempfile
+import os
 from datetime import datetime, timedelta
 import time
 from trading_signal_alert import TradingSignalAlert
@@ -151,7 +153,9 @@ class DynamicZScoreStrategy:
             buy_warn = "买入！"
             sell_warn = "卖出"
             print(f"!!!!!!!!!!! {self.symbol}-{self.name} 检测到交易信号: {buy_warn if last_signal == 1 else sell_warn} !!!!!!!")
-            self.alert.send_alert('buy' if last_signal == 1 else 'sell', f"{self.symbol}-{self.name} 触发[{buy_warn if last_signal == 1 else sell_warn}]信号")
+            self.alert.send_alert('buy' if last_signal == 1 else 'sell', 
+                                f"{self.symbol}-{self.name} 触发[{buy_warn if last_signal == 1 else sell_warn}]信号",
+                                self.get_zscore_chart())
         
     def backtest(self):
         """回测策略"""
@@ -360,6 +364,80 @@ class DynamicZScoreStrategy:
         plt.tight_layout()
         plt.show()
 
+    def get_zscore_chart(self):
+        """可视化结果"""
+        if self.data is None:
+            return None
+        
+        # 确保时间列为datetime类型
+        self.data['时间'] = pd.to_datetime(self.data['时间'])
+        # 只保留最后6天的数据
+        self.data = self.data[self.data['时间'] >= (self.data['时间'].max() - pd.Timedelta(days=6))]
+        # 创建整数索引作为X轴值 (确保曲线连续)
+        self.data['int_index'] = np.arange(len(self.data))
+        
+        # 计算数据时间范围
+        time_range = self.data['时间'].max() - self.data['时间'].min()
+        total_hours = time_range.total_seconds() / 3600
+        
+        # 根据时间范围确定刻度间隔
+        if total_hours <= 24:  # 小于24小时
+            interval = max(1, int(len(self.data)/24))  # 每1-2小时一个刻度
+            date_format = "%H:%M"
+            rotation = 30
+        elif total_hours <= 72:  # 1-3天
+            interval = max(1, int(len(self.data)/12))  # 每半天一个刻度
+            date_format = "%m-%d %H:%M"
+            rotation = 30
+        elif total_hours <= 168:  # 3-7天
+            interval = max(1, int(len(self.data)/7))  # 每天一个刻度
+            date_format = "%m-%d"
+            rotation = 0
+        else:  # 超过7天
+            interval = max(1, int(len(self.data)/10))  # 每10%数据一个刻度
+            date_format = "%m-%d"
+            rotation = 0
+        
+        # 创建主要刻度位置和标签
+        major_ticks = np.arange(0, len(self.data), interval)
+        major_labels = self.data.iloc[major_ticks]['时间'].dt.strftime(date_format).tolist()
+        
+        # 绘制Z-Score和动态阈值
+        plt.figure(figsize=(16, 16))
+        ax1 = plt.subplot(4, 1, 1)
+        
+        # 设置X轴格式
+        ax1.set_xticks(major_ticks)
+        ax1.set_xticklabels(major_labels, rotation=rotation, ha='center')
+        
+        ax1.plot(self.data['int_index'], self.data['z_score'], label='Z-Score', color='purple', linewidth=1.5)
+        ax1.plot(self.data['int_index'], self.data['buy_threshold'], color='red', 
+                linestyle='--', alpha=0.7, label='Bth')
+        ax1.plot(self.data['int_index'], self.data['sell_threshold'], color='green', 
+                linestyle='--', alpha=0.7, label='Sth')
+        ax1.axhline(0, color='black', linestyle='-', alpha=0.5)
+        ax1.set_title('Z-Score And Dynamic-Threshold')
+        ax1.set_ylabel('Z-Score')
+        ax1.legend(loc='upper left')
+        ax1.grid(True, linestyle='--', alpha=0.7)
+        
+        plt.tight_layout()
+
+        # 保存图表到临时文件
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmpfile:
+            plt.savefig(tmpfile.name, dpi=100, bbox_inches='tight')
+            plt.close()
+            tmpfile_path = tmpfile.name  # Save path for later use
+
+        # 读取二进制数据
+        with open(tmpfile_path, 'rb') as f:
+            img_data = f.read()
+
+        # 删除临时文件
+        os.unlink(tmpfile_path)
+        
+        return img_data
+
 if __name__ == "__main__":
     etf_dict = {
         '510500': '中证500ETF',
@@ -371,6 +449,7 @@ if __name__ == "__main__":
         '588000': '科创50ETF',
         '512480': '半导体ETF', 
         '159819': '人工智能ETF', 
+        '512660': '军工ETF',
         '512800': '银行ETF'
     }
 

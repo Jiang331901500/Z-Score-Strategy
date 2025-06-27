@@ -2,6 +2,8 @@
 import time
 import smtplib
 from email.mime.text import MIMEText
+from email.mime.image import MIMEImage
+from email.mime.multipart import MIMEMultipart
 from plyer import notification
 import requests
 from datetime import datetime
@@ -126,7 +128,7 @@ class TradingSignalAlert:
         except Exception as e:
             logging.error(f"无法创建声音文件 {filename}: {e}")
     
-    def send_alert(self, signal_type, message):
+    def send_alert(self, signal_type, message, chart = None):
         """
         发送交易信号提醒
         
@@ -135,13 +137,13 @@ class TradingSignalAlert:
             message (str): 提醒消息内容
         """
         # 将提醒加入队列
-        self.alert_queue.put((signal_type, message))
+        self.alert_queue.put((signal_type, message, chart))
     
     def _process_alerts(self):
         """处理提醒队列的后台线程"""
         while True:
             try:
-                signal_type, message = self.alert_queue.get()
+                signal_type, message, chart = self.alert_queue.get()
                 
                 # 记录日志
                 logging.info(f"交易信号: {signal_type.upper()} - {message}")
@@ -156,7 +158,7 @@ class TradingSignalAlert:
                 
                 # 邮件通知
                 if self.config['email']:
-                    threading.Thread(target=self._send_email, args=(signal_type, message)).start()
+                    threading.Thread(target=self._send_email, args=(signal_type, message, chart)).start()
                 
                 # 短信通知
                 if self.config['sms']:
@@ -204,40 +206,86 @@ class TradingSignalAlert:
         except Exception as e:
             logging.error(f"桌面通知失败: {e}")
     
-    def _send_email(self, signal_type, message):
+    def _send_email(self, signal_type, message, chart = None):
         """发送邮件通知"""
         try:
+            zscore_cid = 'zscore_chart@trading'
             subject = f"交易信号: {'买入' if signal_type == 'buy' else '卖出'}"
             body = f"""
             <html>
+            <head>
+                <style>
+                    body {{
+                        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                        line-height: 1.6;
+                        color: #333;
+                        max-width: 800px;
+                        margin: 0 auto;
+                        padding: 20px;
+                    }}
+                    .chart-container {{
+                        margin-bottom: 30px;
+                        border: 1px solid #e0e0e0;
+                        border-radius: 5px;
+                        padding: 10px;
+                        background-color: white;
+                    }}
+                    .chart-title {{
+                        font-size: 16px;
+                        font-weight: bold;
+                        margin-bottom: 10px;
+                        color: #2c3e50;
+                    }}
+                    img {{
+                        max-width: 100%;
+                        height: auto;
+                        display: block;
+                        margin: 0 auto;
+                    }}
+                </style>
+            </head>
             <body>
                 <h2>{subject}</h2>
                 <p>{message}</p>
                 <p>时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+                <div class="chart-container">
+                    <div class="chart-title">Z-Score指标与动态阈值</div>
+                    <img src="cid:{zscore_cid}" alt="Z-Score走势">
+                </div>
             </body>
             </html>
             """
-            
-            msg = MIMEText(body, 'html')
+            email_receivers = self.config['email_receiver'].split(',')
+            msg = MIMEMultipart('related')
             msg['Subject'] = subject
             msg['From'] = self.config['email_sender']
-            msg['To'] = self.config['email_receiver']
+            msg['To'] = ", ".join(email_receivers)
+            
+            # 文字内容
+            msg_body = MIMEText(body, 'html')
+            msg.attach(msg_body)
+            # 添加Z-Score图表
+            if chart is not None:
+                msg_image = MIMEImage(chart)
+                msg_image.add_header('Content-ID', f'<{zscore_cid}>')
+                msg.attach(msg_image)
             
             # 检查SMTP服务器地址是否正确
             smtp_server = self.config.get('smtp_server', '').strip()
-            smtp_port = self.config.get('smtp_port', 465)
+            smtp_port = self.config.get('smtp_port', 587)
             if not smtp_server:
                 logging.error("SMTP服务器地址未配置")
                 return
 
             try:
-                with smtplib.SMTP_SSL(smtp_server, smtp_port, timeout=10) as server:
+                with smtplib.SMTP(smtp_server, smtp_port, timeout=10) as server:
+                    server.starttls()
                     server.login(self.config['email_sender'], self.config['email_password'])
-                    server.send_message(msg)
-                logging.info("邮件通知已发送")
+                    server.send_message(msg, msg['From'], email_receivers)
+                logging.info(f"邮件通知已发送")
             except smtplib.SMTPResponseException as e:
                 # 邮件已发送但返回出现异常
-                logging.info("邮件通知已发送，但返回出现异常")
+                logging.info(f"邮件通知已发送，但返回出现异常: {e}")
             except Exception as e:
                 logging.error(f"连接SMTP服务器失败: {e}")
         except Exception as e:
