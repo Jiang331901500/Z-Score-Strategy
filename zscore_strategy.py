@@ -471,6 +471,7 @@ if __name__ == "__main__":
             for strategy in strategy_dict.values():
                 # 获取数据
                 try:
+                    time.sleep(1)
                     strategy.fetch_data(start_date, end_date)
                 except Exception:
                     # 重试
