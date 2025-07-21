@@ -14,6 +14,9 @@ import os
 import logging
 from dotenv import load_dotenv
 
+# 全局pygame.mixer锁，确保线程安全
+pygame_mixer_lock = threading.Lock()
+
 class TradingSignalAlert:
     def __init__(self, config=None):
         """
@@ -181,15 +184,15 @@ class TradingSignalAlert:
         """播放声音提醒"""
         try:
             sound_file = self.config['buy_sound'] if signal_type == 'buy' else self.config['sell_sound']
-            
-            # 使用pygame播放声音
-            if not pygame.mixer.get_init():
-                pygame.mixer.init()
-            sound = pygame.mixer.Sound(sound_file)
-            channel = sound.play()
-            # 等待声音播放完成
-            while channel.get_busy():
-                time.sleep(0.1)
+            # 使用全局锁保证pygame.mixer线程安全
+            global pygame_mixer_lock
+            with pygame_mixer_lock:
+                if not pygame.mixer.get_init():
+                    pygame.mixer.init()
+                sound = pygame.mixer.Sound(sound_file)
+                channel = sound.play()
+                while channel.get_busy():
+                    time.sleep(0.1)
         except Exception as e:
             logging.error(f"播放声音失败: {e}")
     
