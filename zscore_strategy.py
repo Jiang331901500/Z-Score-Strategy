@@ -32,6 +32,7 @@ class DynamicZScoreStrategy:
         self.data = None
         self.positions = []
         self.initial_capital=initial_capital
+        self.on_backtest = False
 
         self.alert = TradingSignalAlert()
         
@@ -68,9 +69,10 @@ class DynamicZScoreStrategy:
         
         # 计算Z-Score
         self.data['z_score'] = (self.data['收盘'] - self.data['rolling_mean']) / self.data['rolling_std']
+
+        # 计算动态阈值
+        strategy.calculate_dynamic_thresholds()
         
-        # 前window-1个数据点无法计算Z-Score
-        self.data = self.data[self.window-1:].copy()
         
     def calculate_dynamic_thresholds(self):
         """计算动态阈值"""
@@ -99,55 +101,102 @@ class DynamicZScoreStrategy:
         )
         
         # 计算动态阈值
-        self.data['buy_threshold'] = -self.data['dynamic_multiplier']
-        self.data['sell_threshold'] = self.data['dynamic_multiplier']
+        self.data['z_buy_threshold'] = -self.data['dynamic_multiplier']
+        self.data['z_sell_threshold'] = self.data['dynamic_multiplier']
+
+    def calculate_cci(self):
+        """
+        计算CCI指标
+        """
+        if self.data is None:
+            return
+        
+        # 计算典型价格
+        self.data['typical_price'] = (self.data['最高'] + self.data['最低'] + self.data['收盘']) / 3
+
+        # 计算典型价格的简单移动平均
+        self.data['sma_tp'] = self.data['typical_price'].rolling(window=self.window).mean()
+
+        # 计算平均偏差
+        self.data['mean_deviation'] = self.data['typical_price'].rolling(window=self.window).apply(
+            lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
+        )
+
+        # 计算CCI
+        self.data['cci'] = (self.data['typical_price'] - self.data['sma_tp']) / (0.015 * self.data['mean_deviation'])
+
+        self.data['cci_overbought'] = 100
+        self.data['cci_oversold'] = -self.data['cci_overbought']
         
     def generate_signals(self):
         """生成交易信号"""
-        if self.data is None or 'z_score' not in self.data.columns or 'buy_threshold' not in self.data.columns:
+        if self.data is None:
             return
+        
+        # 前window-1个数据点无法计算
+        self.data = self.data[self.window-1:].copy()
             
-        self.data['signal'] = 0  # 0表示无信号，1表示买入，-1表示卖出
+        self.data['z_signal'] = 0  # 0表示无信号，1表示买入，-1表示卖出
+        self.data['cci_signal'] = 0
         
-        # 当Z-Score低于买入阈值时买入
-        self.data.loc[self.data['z_score'] <= self.data['buy_threshold'], 'signal'] = 1
+        if 'z_score' in self.data.columns and 'z_buy_threshold' in self.data.columns:
+            # 当Z-Score低于买入阈值时买入
+            buy_condition = (self.data['z_score'].shift(1) > self.data['z_buy_threshold'] ) & (self.data['z_score'] <= self.data['z_buy_threshold'])
+            self.data.loc[buy_condition, 'z_signal'] = 1
+            # 当Z-Score高于卖出阈值时卖出
+            sell_condition = (self.data['z_score'].shift(1) < self.data['z_sell_threshold']) & (self.data['z_score'] >= self.data['z_sell_threshold'])
+            self.data.loc[sell_condition, 'z_signal'] = -1
         
-        # 当Z-Score高于卖出阈值时卖出
-        self.data.loc[self.data['z_score'] >= self.data['sell_threshold'], 'signal'] = -1
-        
+        if 'cci' in self.data.columns:
+            # 生成CCI买入信号 (CCI从超卖区域上穿超卖线)
+            buy_condition = (self.data['cci'].shift(1) < self.data['cci_oversold']) & (self.data['cci'] >= self.data['cci_oversold'])
+            self.data.loc[buy_condition, 'cci_signal'] = 1
+            # 生成CCI卖出信号 (CCI从超买区域下穿超买线)
+            sell_condition = (self.data['cci'].shift(1) > self.data['cci_overbought']) & (self.data['cci'] <= self.data['cci_overbought'])
+            self.data.loc[sell_condition, 'cci_signal'] = -1
+
+
         # 避免连续买入或卖出，只有当信号变化时才触发
-        self.data['positions'] = self.data['signal'].diff()
-        self.data.loc[self.data['signal'] == 0, 'positions'] = 0
+        # 合并Z-Score和CCI信号，只要有一个信号触发即买入或卖出
+        self.data['positions'] = self.data['z_signal'] + self.data['cci_signal']
+        self.data['positions'] = self.data['positions'].clip(-1, 1)  # 限制为-1, 0, 1
 
     def observe(self):
-        if self.data is None or 'z_score' not in self.data.columns or 'buy_threshold' not in self.data.columns:
+        if self.data is None or 'positions' not in self.data.columns:
             return
+        
         price = self.data.iloc[-1]['收盘']
-        z_score = self.data.iloc[-1]['z_score']
-        threshold = self.data.iloc[-1]['sell_threshold']
+        z_score = self.data.iloc[-1]['z_score'] if 'z_score' in self.data.columns else "N/A"
+        z_threshold = self.data.iloc[-1]['z_sell_threshold'] if 'z_sell_threshold' in self.data.columns else "N/A"
+        cci = self.data.iloc[-1]['cci'] if 'cci' in self.data.columns else "N/A"
+        cci_overbought = self.data.iloc[-1]['cci_overbought'] if 'cci_overbought' in self.data.columns else "N/A"
+
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
-        print(f"--> [{now}] {self.symbol}-{self.name}    \t Price: {price}\t ZScore: {z_score}\t Thres: ±{threshold}")
+        print(f"--> [{now}] {self.symbol}-{self.name}    \t Price: {price}\t ZScore: {z_score}\t ZThres: ±{z_threshold}\t CCI: {cci}\t CCIThres: ±{cci_overbought}")
+        
         # 打印信号检测信息（仅检测最后一行）
         last_signal = self.data.iloc[-1]['positions']
 
-        # 如果之前触发过卖出，则不再连续触发卖出；如果之前触发过买入，则30分钟内不再触发买入
-        if not hasattr(self, '_last_buy_time'):
-            self._last_buy_time = None
-        if not hasattr(self, '_last_sell_time'):
-            self._last_sell_time = None
-        if last_signal == 1:
-            # 触发买入时，重置卖出时间
-            self._last_sell_time = None
-            # 买入信号，30分钟内不再重复触发买入
+        if not self.on_backtest:
             now_time = datetime.now()
-            if self._last_buy_time is not None and (now_time - self._last_buy_time).total_seconds() < 1800:
-                return
-            self._last_buy_time = now_time
-        elif last_signal == -1:
-            # 卖出信号，不连续重复触发卖出
-            if self._last_sell_time is not None:
-                return
-            self._last_sell_time = datetime.now()
+            if not hasattr(self, '_last_buy_time'):
+                self._last_buy_time = None
+            if not hasattr(self, '_last_sell_time'):
+                self._last_sell_time = None
+            if last_signal == 1:
+                # 触发买入时，重置卖出时间
+                self._last_sell_time = None
+                # 买入信号，15分钟内不再重复触发买入
+                if self._last_buy_time is not None and (now_time - self._last_buy_time).total_seconds() < 900:
+                    return
+                self._last_buy_time = now_time
+            elif last_signal == -1:
+                # 触发卖出时，重置买入时间
+                self._last_buy_time = None
+                # 卖出信号，15分钟内不再重复触发卖出
+                if self._last_sell_time is not None and (now_time - self._last_sell_time).total_seconds() < 900:
+                    return
+                self._last_sell_time = now_time
 
         if last_signal != 0:
             buy_warn = "买入！"
@@ -155,13 +204,13 @@ class DynamicZScoreStrategy:
             print(f"!!!!!!!!!!! {self.symbol}-{self.name} 检测到交易信号: {buy_warn if last_signal == 1 else sell_warn} !!!!!!!")
             self.alert.send_alert('buy' if last_signal == 1 else 'sell', 
                                 f"{self.symbol}-{self.name} 触发[{buy_warn if last_signal == 1 else sell_warn}]信号",
-                                self.get_zscore_chart())
+                                self.get_chart())
         
     def backtest(self):
         """回测策略"""
         if self.data is None or 'positions' not in self.data.columns:
             raise ValueError("请先生成交易信号")
-            
+        
         # 初始化回测变量
         capital = self.initial_capital  # 初始资金
         position = 0  # 持仓数量
@@ -310,9 +359,9 @@ class DynamicZScoreStrategy:
         # 绘制Z-Score和动态阈值
         ax2 = plt.subplot(4, 1, 2, sharex=ax1)
         ax2.plot(self.data['int_index'], self.data['z_score'], label='Z-Score', color='purple', linewidth=1.5)
-        ax2.plot(self.data['int_index'], self.data['buy_threshold'], color='red', 
+        ax2.plot(self.data['int_index'], self.data['z_buy_threshold'], color='red', 
                 linestyle='--', alpha=0.7, label='Bth')
-        ax2.plot(self.data['int_index'], self.data['sell_threshold'], color='green', 
+        ax2.plot(self.data['int_index'], self.data['z_sell_threshold'], color='green', 
                 linestyle='--', alpha=0.7, label='Sth')
         ax2.axhline(0, color='black', linestyle='-', alpha=0.5)
         ax2.set_title('Z-Score And DynThres')
@@ -320,22 +369,15 @@ class DynamicZScoreStrategy:
         ax2.legend(loc='upper left')
         ax2.grid(True, linestyle='--', alpha=0.7)
         
-        # 绘制动态阈值倍数和波动率
+        # 绘制cci和阈值
         ax3 = plt.subplot(4, 1, 3, sharex=ax1)
-        ax3.plot(self.data['int_index'], self.data['dynamic_multiplier'], 
-                label='Multi', color='blue', linewidth=1.5)
-        ax3.axhline(self.base_multiplier, color='red', linestyle='--', 
-                   alpha=0.7, label='BaseMulti')
-        ax3.set_title('DynThresMulti')
-        ax3.set_ylabel('Multi')
-        
-        # 添加第二个Y轴显示波动率
-        ax3b = ax3.twinx()
-        ax3b.plot(self.data['int_index'], self.data['smoothed_vol'], 
-                 label='Vol', color='green', alpha=0.7)
-        ax3b.set_ylabel('Vol', color='green')
-        ax3b.tick_params(axis='y', labelcolor='green')
-        
+        ax3.plot(self.data['int_index'], self.data['cci'], label='CCI', color='brown', linewidth=1.5)
+        ax3.plot(self.data['int_index'], self.data['cci_overbought'], color='red', 
+                 linestyle='--', alpha=0.7, label='Overbought')
+        ax3.plot(self.data['int_index'], self.data['cci_oversold'], color='green', 
+                 linestyle='--', alpha=0.7, label='Oversold')
+        ax2.set_title('CCI')
+        ax2.set_ylabel('CCI')
         ax3.legend(loc='upper left')
         ax3.grid(True, linestyle='--', alpha=0.7)
         
@@ -364,7 +406,7 @@ class DynamicZScoreStrategy:
         plt.tight_layout()
         plt.show()
 
-    def get_zscore_chart(self):
+    def get_chart(self):
         """可视化结果"""
         if self.data is None:
             return None
@@ -401,8 +443,7 @@ class DynamicZScoreStrategy:
         # 创建主要刻度位置和标签
         major_ticks = np.arange(0, len(self.data), interval)
         major_labels = self.data.iloc[major_ticks]['时间'].dt.strftime(date_format).tolist()
-        
-        # 绘制Z-Score和动态阈值
+    
         plt.figure(figsize=(16, 16))
         ax1 = plt.subplot(4, 1, 1)
         
@@ -410,16 +451,29 @@ class DynamicZScoreStrategy:
         ax1.set_xticks(major_ticks)
         ax1.set_xticklabels(major_labels, rotation=rotation, ha='center')
         
+        # 绘制Z-Score和动态阈值
         ax1.plot(self.data['int_index'], self.data['z_score'], label='Z-Score', color='purple', linewidth=1.5)
-        ax1.plot(self.data['int_index'], self.data['buy_threshold'], color='red', 
+        ax1.plot(self.data['int_index'], self.data['z_buy_threshold'], color='red', 
                 linestyle='--', alpha=0.7, label='Bth')
-        ax1.plot(self.data['int_index'], self.data['sell_threshold'], color='green', 
+        ax1.plot(self.data['int_index'], self.data['z_sell_threshold'], color='green', 
                 linestyle='--', alpha=0.7, label='Sth')
         ax1.axhline(0, color='black', linestyle='-', alpha=0.5)
         ax1.set_title('Z-Score And Dynamic-Threshold')
         ax1.set_ylabel('Z-Score')
         ax1.legend(loc='upper left')
         ax1.grid(True, linestyle='--', alpha=0.7)
+
+        # 绘制cci和阈值
+        ax2 = plt.subplot(4, 1, 2, sharex=ax1)
+        ax2.plot(self.data['int_index'], self.data['cci'], label='CCI', color='brown', linewidth=1.5)
+        ax2.plot(self.data['int_index'], self.data['cci_overbought'], color='red', 
+                 linestyle='--', alpha=0.7, label='Overbought')
+        ax2.plot(self.data['int_index'], self.data['cci_oversold'], color='green', 
+                 linestyle='--', alpha=0.7, label='Oversold')
+        ax2.set_title('CCI')
+        ax2.set_ylabel('CCI')
+        ax2.legend(loc='upper left')
+        ax2.grid(True, linestyle='--', alpha=0.7)
         
         plt.tight_layout()
 
@@ -450,7 +504,8 @@ if __name__ == "__main__":
         '512480': '半导体ETF', 
         '159819': '人工智能ETF', 
         '512660': '军工ETF',
-        '512800': '银行ETF'
+        '512800': '银行ETF',
+        '512880': '证券ETF'
     }
 
     # 创建策略实例
@@ -460,6 +515,10 @@ if __name__ == "__main__":
 
     while True:
         now = datetime.now()
+        weekday = now.weekday()
+        if weekday >= 5:  # 周末休市
+            print('--- 周末休市 ---')
+            break
         morning_start = datetime(year=now.year, month=now.month, day=now.day, hour=9, minute=35, second=0, microsecond=0)
         morning_end = datetime(year=now.year, month=now.month, day=now.day, hour=11, minute=30, second=0, microsecond=0)
         afternoon_start = datetime(year=now.year, month=now.month, day=now.day, hour=13, minute=5, second=0, microsecond=0)
@@ -485,12 +544,13 @@ if __name__ == "__main__":
             for strategy in strategy_dict.values():
                 # 计算Z-Score
                 strategy.calculate_zscore()
-                # 计算动态阈值
-                strategy.calculate_dynamic_thresholds()
+                # 计算CCI
+                strategy.calculate_cci()
                 # 生成交易信号
                 strategy.generate_signals()
                 # 打印输出以及发送提示
                 strategy.observe()
+
         elif now > afternoon_end:
             print('--- 今日已结束 ---')
             break
